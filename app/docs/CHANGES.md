@@ -1,5 +1,77 @@
 # Changelog
 
+## v21.25.1 — "ELITE score ke bawajood auto trade nahi lag raha" + CoinDCX tab khaali (2026-10-25)
+
+**User ask: "crypto coindcx tab me koi trade mill hi nhi hai aur elite score rehne par bhi Live auto trade button on rehne par bhi auto trade nahi lag raha — sirf itna hi theek kardo."**
+
+### Root cause (live-probe verified, not guessed)
+Live probe on this build showed the FUTURES/CRYPTO dual board carrying rows like `LINK SHORT 95 ELITE · trigger FIRED · PAKKA verified · 8/8 institutional`, and **still** zero trades. Reason chain:
+
+1. **Main-ensemble dead-end.** Every auto/manual entry required the *main* AI-BOARD (16-seat ensemble) to grade that symbol **ACTION/STRONG/ELITE with confidence ≥ 60** (`ensembleSignalAvailable`). The main board's universe and bar are different from the dual board's — a live probe at 14:05 IST showed its best FUTURES grade at **69 / WATCH**, i.e. *nothing* could ever pass. Gold/Silver (XAU/XAG) and EQUITY SIM symbols are not even in that universe, so they were a **permanent** dead-end. Result: `main AI-BOARD ensemble signal unavailable` on every ELITE row → auto + manual both dead.
+2. **Blank board in quiet markets.** `rankDualRows()` drops rows below the WATCH floor (50). When nothing crosses it the CoinDCX tab rendered **zero cards**, which reads as "the site has no trades".
+
+### Fix 1 — SELF-VERIFIED AUTO LANE (`selfVerifiedForAuto` / `autoEnsembleOk`)
+A row may now trade on its **own** verification when the main board has no coverage or is still WATCH. It must clear *every* hard gate: `directionVerified` (dual-TF + ≥6/8 institutional) · `triggerFired` · no counter-trend/counter-HTF · no board/SVA/council hard conflict · no trap / zone-wall / reversal veto · no post-peak / overextended / opposing flow · **DIG ALIGNED** (v21.25.0 direction-integrity) · score ≥ 65 · TF-fit GOOD/OK · complete entry/SL/T1 ticket.
+
+Wired in all four gates: `dualAutoCandidates`, `mtfProEntryGate` (manual 🧪 PAPER / ⚡ LIVE cards), the auto-tick `eligible` filter + second-chance path, and the UC flip-reverse re-entry.
+
+**Not a loophole** — every original veto is intact. In particular an **opposing main-board side still triggers the cross-engine veto**, and a main-board `AVOID/FLIP/REJECT` verifier still blocks. Only "the main board doesn't cover this symbol / is still WATCH" is no longer fatal.
+
+### Fix 2 — NEVER-BLANK BOARD
+`getDualMtfBoard()` now falls back to the best directional rows (valid side + complete SL/T1) when the ranked pool is empty, labelled WATCH, with `rankFallback: true` in the payload. The CoinDCX tab always shows what the market is doing instead of a blank panel.
+
+### Live proof on this build (same machine, real market data)
+- Board: `LINK SHORT 95 ELITE · auto=True · selfVerified=True · ensembleSignalAvailable=False` → auto-tick opened **LINK SHORT** paper @ 11.365 · SL 11.4318 · T1 11.2982 · T2 11.2313 (`executionMode: PAPER`, source `mtf-auto`).
+- Paper Desk **CRYPTO** (CoinDCX tab) now lists that trade — the "koi trade nahi" symptom is gone.
+- Direction parity on the new trade: declared SHORT, geometry `OK` (SL > entry > T1 ≥ T2), `directionIntegrityBook → inversions: 0`.
+
+### Tests
+- `test/mtfDualBoard.test.ts` — ensemble-gate tests rewritten for the new contract (+3 new cases: self-verified row passes, non-verified still fails closed, opposing main side still vetoes).
+- `test/v2125DirectionIntegrity.test.ts` — +3 cases pinning `selfVerifiedForAuto` / `autoEnsembleOk`, including a 12-case "not a loophole" matrix.
+
+## v21.25.0 — DIRECTION INTEGRITY GUARD + Dual-Board & AUTO-Live intelligence upgrade (2026-10-25)
+
+**User ask: "MTF Dual-Timeframe Signal Board aur AUTO Live Trade intelligence ko deep analyse + upgrade karo; aur deeply recheck karo ki signals sahi LONG/SHORT direction me land kar rahe hain — kahin inversion (LONG signal → SHORT trade) ho raha hai kya? Fix karo."**
+
+### Verdict: no inversion found in the live path — and it is now provable, not asserted
+- Ticket geometry (C1) correct on every live dual-board row (FUTURES/CRYPTO/INDIA).
+- Handoff `row.side → paper.openPaperTrade / liveExecute → futuresOrderBody` passes the same side; `LONG/BUY→'buy'`, `SHORT/SELL→'sell'`, unknown throws.
+- New auditor `npm run audit:direction`: **72 pass · 0 INVERSION · 28 counter-read (warn) · exit 0**.
+- Boot certificate grew 18 → **24 checks** (`[direction-selftest] PASS 24/24`).
+
+### 1) NEW — `server/ai/directionIntegrity.js` (single source of truth for the LONG/SHORT invariant)
+Pure module covering the five inversion vectors that used to live in five different files:
+| Vector | Function |
+|---|---|
+| V1 ticket geometry (SL on the wrong side of entry) | `checkLevelGeometry()` — `LONG_SL_ABOVE_ENTRY`, `SHORT_T1_ABOVE_ENTRY`, inverted target ladders… |
+| V2 signal→order handoff | `assertExecutionSide()` — `SIDE_MISMATCH` blocks the order |
+| V3 vocabulary (buy/sell leak) | `normalizeSide()` (unknown → `null`, never LONG) + `scanPayloadSideLeaks()` |
+| V4 post-fill / fresh-price level repair | `guardLevelsForSide()` — logged re-derive, never silent |
+| V5 side-less ticket | `resolveSideFromGeometry()` — derive from level-ordering + `repaired` stamp |
+| V6 book drift | `auditBookDirectionIntegrity()` |
+
+Plus `assessDirectionIntegrity()` — an independent multi-read audit (context / trigger / EMA-stack / momentum / structure / HTF) yielding `ALIGNED | COUNTER_READ | INVERTED | GEOMETRY_BROKEN | MISSING_SIDE`. **`INVERTED` requires 3+ independent reads against the side** — a legitimate counter-trend pullback can never be mislabelled an inversion.
+
+### 2) MTF Dual-Timeframe Board upgrade
+- Per row: `directionIntegrity` (+ `digLabel`, `digScore`, `digNote`) and `liveIntelligence` (8-check live conviction stack).
+- Board payload: `directionIntegrity` digest (`aligned / counterRead / inverted / geometryBroken / hardBlocked / avgScore`) and `liveIntelligence` roll-up (`liveReady / liveA / liveB / paper / watch / avgConviction`).
+- Auto gating: `INVERTED`/`GEOMETRY_BROKEN`/`MISSING_SIDE` → hard block; `COUNTER_READ` with 2+ reads against → WATCH-only; a single counter-read stays allowed but is **labelled**.
+- UI: 🧭 DIG chip + 🟢 LIVE-READY chip per card, two header digest chips, 🧭 DIR-INTEGRITY BOOK chip on the auto bar.
+
+### 3) AUTO Live Trade intelligence upgrade
+- **8-check conviction stack** (L1 direction integrity → L8 no structural veto) with a weighted `convictionScore` and `LIVE-A/LIVE-B/PAPER/WATCH` tiers.
+- **Live bar**: `liveMinConvictionChecks` (default 5, config) — below the bar the LIVE order is skipped (strict-LIVE: entry skipped; auto-sync: paper entry + `live-downgrade` log). Never silent.
+- **Pre-execution DIRECTION INTEGRITY GATE** in `mtfAutoLink` (canonical side → DIG hard-block → geometry repair → handoff assert) runs *before* `paper.openPaperTrade`.
+- **Post-fill direction proof**: exchange-returned levels re-validated; unrepairable → trade tracked with a hard `directionIntegrity.alert`.
+- **Book watchdog** on `/api/ai/mtf-auto/status → directionIntegrityBook`; every book record stamps `signalSide` + `directionIntegrity`.
+
+### 4) Tooling
+- `scripts/direction-audit.mjs` — C1 geometry · C2–C5 independent counter-reads (warn) · C6 auto-link side · **C7 DIG verdict** · **C8 live conviction** · **auto-live book audit**; severity doctrine documented (only real wrong-side contradictions exit 1). Wired as `npm run audit:direction`.
+- `test/v2125DirectionIntegrity.test.ts` — 27 tests (geometry matrix, handoff, verdicts, repair, book audit, leak scan, wiring source pins).
+
+### 5) Gates (this release)
+typecheck PASS · lint 0 errors · check:version 21.25.0 · check:routes PASS · vitest **4434 tests, 4433 pass** (1 known load-flake: `signalRecheck` network timeout — passes standalone) · build + `dist/.build-version 21.25.0` · boot-smoke 10/0 · audit:direction 0 inversions.
+
 ## v21.24.0 — PRO-TRADER AUDIT: tradability gate + chart-chain + security/ops fixes (2026-10-24)
 
 **User ask: "full site code deep advance pro trader level pe recheck karo, issues fix kardo, strategies top level pe hai kya, signals accurate hai kya, unwanted code clean up kardo"**

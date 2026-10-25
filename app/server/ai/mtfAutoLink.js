@@ -43,7 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isNseMarketOpen, freshEntriesAllowedFor, dayKeyFor, istDayKey } from '../intraday/time.js';
-import { dualAutoCandidates } from './mtfDualBoard.js';
+import { dualAutoCandidates, selfVerifiedForAuto } from './mtfDualBoard.js';
 import { SUPER_TIERS } from './superIntel.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor, evaluateFeeAwareReversalExit } from '../exec/sizing.js';
 // v21.23.15 [PHASE-3 PERSISTENCE]: config + state ab encrypted durable
@@ -72,6 +72,14 @@ import {
 } from './volTrail.js';
 // v21.24.0 SMART TRAIL v2: noise-aware ratchet + rolling TP2 (shadow default; SMART_TRAIL_V2=enforce to act).
 import { smartTrailMode, smartTrailConfig, smartTrailPlan, smartExtendTarget } from './smartTrail.js';
+// v21.25.0 DIRECTION INTEGRITY GUARD (DIG) — ek hi jagah par poora
+// LONG/SHORT invariant: side canonicalization, ticket geometry, signal→order
+// handoff, aur post-fill level repair. Auto lane me ye pre-execution gate
+// hai — inversion evidence milne par trade BLOCK hota hai (paper + live).
+import {
+  normalizeSide, checkLevelGeometry, assertExecutionSide,
+  guardLevelsForSide, auditBookDirectionIntegrity,
+} from './directionIntegrity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
@@ -1352,7 +1360,7 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     const reverseReady = Boolean(
       boardRow
       && boardRow.directionVerified === true
-      && boardRow.ensembleSignalAvailable !== false
+      && (boardRow.ensembleSignalAvailable !== false || selfVerifiedForAuto(boardRow))
       && boardRow.autoEligible === true
       && boardRow.counterTrend !== true
       && boardRow.counterHtf !== true
@@ -2125,7 +2133,7 @@ export async function mtfAutoTick(p = {}) {
     let eligible = picks.filter(r =>
       r.autoPickBlockers.length === 0
       && (r.side === 'LONG' || r.side === 'SHORT')
-      && r.ensembleSignalAvailable !== false
+      && (r.ensembleSignalAvailable !== false || selfVerifiedForAuto(r))
       && r.directionVerified !== false
       && !r.reversalRisk
       && !r.trigger?.reversalRisk
@@ -2160,7 +2168,7 @@ export async function mtfAutoTick(p = {}) {
     if (eligible.length === 0 && isLiveExecActive && sessionOpen().length === 0) {
       eligible = picks.filter(r =>
         (r.side === 'LONG' || r.side === 'SHORT')
-        && r.ensembleSignalAvailable !== false
+        && (r.ensembleSignalAvailable !== false || selfVerifiedForAuto(r))
         && r.directionVerified === true
         && r.triggerFired === true
         // v21.23.10 [THRASH-CURE HOLE #2]: ye fallback autoPickBlockers BYPASS
@@ -2234,9 +2242,11 @@ export async function mtfAutoTick(p = {}) {
         continue;
       }
       const entry = Number(row.plan?.entry);
-      const sl = Number(row.plan?.stopLoss);
-      const t1 = Number(row.plan?.t1);
-      const t2 = Number(row.plan?.t2);
+      // v21.25.0: sl/t1/t2 mutable hain taaki direction-integrity gate
+      // inverted ticket ko entry ke against re-derive kar sake (logged repair).
+      let sl = Number(row.plan?.stopLoss);
+      let t1 = Number(row.plan?.t1);
+      let t2 = Number(row.plan?.t2);
       const riskPerUnit = Math.abs(entry - sl);
       if (!(entry > 0) || !(riskPerUnit > 0) || !(t1 > 0) || !(t2 > 0)) { out.skipped.push(`${sym}: incomplete ticket`); continue; }
 
@@ -2330,6 +2340,19 @@ export async function mtfAutoTick(p = {}) {
         Boolean(siteLiveForDesk(p, row.market)) &&
         (cfg.executionMode === 'live' || cfg.autoSyncSiteLive !== false) &&
         isEliteOrStrong;
+      // v21.25.0 AUTO LIVE CONVICTION GATE: live me real money jaati hai, to
+      // board row ka 8-check conviction stack (L1 direction-integrity …
+      // L8 no-veto) live lane ke liye minimum bar cross karna chahiye.
+      // Bar se neeche row PAPER me jaati hai (silent nahi — reason logged).
+      const liveConv = row.liveIntelligence;
+      const liveCheckBar = Number(cfg.liveMinConvictionChecks ?? 5);
+      const liveConvictionOk = !liveConv || (Number(liveConv.checksPassed) >= liveCheckBar);
+      const wantLiveOrderFinal = wantLiveOrder && liveConvictionOk;
+      let liveConvictionDowngrade = null;
+      if (wantLiveOrder && !liveConvictionOk) {
+        liveConvictionDowngrade = `conviction ${liveConv.checksPassed}/${liveConv.checksTotal} < live bar ${liveCheckBar} (${(liveConv.blockers || []).slice(0, 2).join('; ')})`;
+        _logEvent('live-downgrade', `🛡 ${sym}: LIVE order skip — ${liveConvictionDowngrade} · ${cfg.executionMode === 'live' ? 'strict LIVE me entry skip' : 'PAPER entry li jaa rahi hai'}`);
+      }
 
       // In strict live-only mode, only ELITE/STRONG rows auto-place
       if (cfg.executionMode === 'live' && !isEliteOrStrong) {
@@ -2342,7 +2365,7 @@ export async function mtfAutoTick(p = {}) {
       // fake signal deta hai jabki exchange par kuch nahi jaata. Explicit skip
       // + reason do, taaki user desk LIVE arm kare ya PAPER mode chune.
       // EQUITY SIM exempt hai — wo design se paper/SIM-only desk hai.
-      if (cfg.executionMode === 'live' && !isSimRow && !wantLiveOrder) {
+      if (cfg.executionMode === 'live' && !isSimRow && !wantLiveOrderFinal) {
         out.skipped.push(`${sym}: LIVE mode ON but ${row.market} desk site-live not armed — paper fallback skipped (desk LIVE arm karo ya PAPER mode chuno)`);
         continue;
       }
@@ -2354,6 +2377,49 @@ export async function mtfAutoTick(p = {}) {
       const entryAtrPct = Number(row.context?.atrPct) > 0 ? Number(row.context.atrPct) : null;
       const entryVolClass = entryAtrPct != null ? classifyVolatility(entryAtrPct) : (row.context?.volClass || VOL_CLASS.NORMAL);
       const entryT1ClosePct = tp1ClosePctFor(entryVolClass);
+
+      // ------------------------------------------------------------
+      // v21.25.0 DIRECTION INTEGRITY GATE (pre-execution, paper + live)
+      // ------------------------------------------------------------
+      // Yahan se neeche har call `row.side` hi use karta hai, par ye gate
+      // ek independent proof deta hai ki jo side order me ja rahi hai wo
+      // (a) canonical hai, (b) ticket geometry usi side ki hai, aur
+      // (c) board row ka apna direction-integrity verdict blocking nahi hai.
+      // Kuch bhi mismatch = trade SKIP (inversion kabhi execute nahi hoti).
+      {
+        const boardSide = normalizeSide(row.side);
+        if (!boardSide) {
+          out.skipped.push(`${sym}: side "${row.side}" canonical LONG/SHORT nahi — direction-integrity block`);
+          _logEvent('dir-block', `⛔ ${sym}: invalid side "${row.side}" — koi order nahi bheja (silent LONG default band)`);
+          continue;
+        }
+        if (row.directionIntegrity?.hardBlock) {
+          out.skipped.push(`${sym}: direction-integrity ${row.directionIntegrity.verdict} (${(row.directionIntegrity.conflicts || []).slice(0, 2).join('; ') || 'multi-read conflict'}) — block`);
+          _logEvent('dir-block', `⛔ ${sym}: ${row.directionIntegrity.label} — auto/live entry blocked (inversion suspect)`);
+          continue;
+        }
+        // Geometry repair: SL/T1/T2 side ke against hain to entry se re-derive.
+        // (Fresh-price re-anchor ke baad hi ho sakta hai; silent nahi — log.)
+        const geo = checkLevelGeometry({ side: boardSide, entry, stopLoss: sl, t1, t2 });
+        if (!geo.ok) {
+          const rep = guardLevelsForSide({ side: boardSide, entry, stopLoss: sl, t1, t2 });
+          if (rep.ok) {
+            _logEvent('dir-repair', `🔧 ${sym} ${boardSide}: ticket geometry inverted thi (${geo.code}) — levels repair: ${rep.fixes.join(' | ')}`);
+            sl = rep.stopLoss; t1 = rep.t1; t2 = rep.t2;
+          } else {
+            out.skipped.push(`${sym}: ticket geometry ${geo.code} (${geo.reason}) — repair fail, entry blocked`);
+            _logEvent('dir-block', `⛔ ${sym} ${boardSide}: ${geo.reason} — koi order nahi bheja`);
+            continue;
+          }
+        }
+        // Belt-and-braces handoff assert: signal side === exec side.
+        const handoff = assertExecutionSide({ signalSide: row.side, execSide: boardSide, label: `${sym} auto-entry` });
+        if (!handoff.ok) {
+          out.skipped.push(`${sym}: ${handoff.reason}`);
+          _logEvent('dir-block', `⛔ ${sym}: ${handoff.reason}`);
+          continue;
+        }
+      }
 
       const res = paper.openPaperTrade?.({
         symbol: sym,
@@ -2384,12 +2450,13 @@ export async function mtfAutoTick(p = {}) {
       // If liveExecute is absent or the live order does NOT fill, roll back the paper trade immediately
       // and DO NOT push any untraded entry into _state.book or Deep Monitor!
       let liveOrderResult = null;
+      let postFillDirAlert = null;
       let finalQty = qty;
       let finalEntry = entry;
       let finalSl = sl;
       let finalT1 = t1;
       let finalT2 = t2;
-      if (wantLiveOrder) {
+      if (wantLiveOrderFinal) {
         if (typeof p.liveExecute !== 'function') {
           _voidRollbackPaperTrade(paper, res, p.quotes);
           _stampLiveAttemptFailure(sym, 'live execution handler unavailable', now);
@@ -2429,6 +2496,25 @@ export async function mtfAutoTick(p = {}) {
           if (Number(liveOrderResult?.filled?.stopLoss) > 0) finalSl = Number(liveOrderResult.filled.stopLoss);
           if (Number(liveOrderResult?.filled?.t1) > 0) finalT1 = Number(liveOrderResult.filled.t1);
           if (Number(liveOrderResult?.filled?.t2) > 0) finalT2 = Number(liveOrderResult.filled.t2);
+          // v21.25.0 POST-FILL DIRECTION PROOF: exchange fill ke baad jo
+          // levels wapas aaye wo side ke against ho sakte hain (fresh-price
+          // re-anchor / partial fill). Live book me ulta ticket kabhi na jaye.
+          {
+            const post = checkLevelGeometry({ side: row.side, entry: finalEntry, stopLoss: finalSl, t1: finalT1, t2: finalT2 });
+            if (!post.ok) {
+              const rep = guardLevelsForSide({ side: row.side, entry: finalEntry, stopLoss: finalSl, t1: finalT1, t2: finalT2 });
+              if (rep.ok) {
+                _logEvent('dir-repair', `🔧 POST-FILL ${sym} ${row.side}: ${post.code} — levels repair: ${rep.fixes.join(' | ')}`);
+                finalSl = rep.stopLoss; finalT1 = rep.t1; finalT2 = rep.t2;
+              } else {
+                // Live order already exchange par hai — book entry chhodna
+                // untracked position chhodna hoga (worse). Isliye entry rakho
+                // par row par HARD ALERT stamp karo (deep monitor + UI dikhaye).
+                postFillDirAlert = post.reason || post.code;
+                _logEvent('dir-alert', `⚠ POST-FILL ${sym} ${row.side}: ${post.reason} — position tracked with ALERT flag (manual review)`);
+              }
+            }
+          }
           _logEvent('live-entry', `LIVE ORDER PLACED ${sym} ${row.side} @ ${finalEntry} · ${leverage}x leverage · ${w95.walletDeployPct}% Wallet (₹${w95.deployedWalletINR} / ₹${Math.round(effectiveWalletINR)}) · qty ${finalQty}`);
         } catch (e) {
           _voidRollbackPaperTrade(paper, res, p.quotes);
@@ -2455,9 +2541,21 @@ export async function mtfAutoTick(p = {}) {
         executionMode: liveOrderResult?.ok ? 'LIVE' : 'PAPER',
         traded: true,
         fullControl: Boolean(liveOrderResult?.ok),
-        openedInLiveMode: Boolean(wantLiveOrder),
+        openedInLiveMode: Boolean(wantLiveOrderFinal),
         symbol: sym, market, execMarket, ccy: isSimRow ? 'USDC' : (isUsd ? 'USDT' : 'INR'), fxUsed: isUsd ? fxRate : null,
         side: row.side,
+        // v21.25.0 DIRECTION PROOF STAMP: kis signal side se ye trade khula,
+        // kis gate se guzra, aur uska integrity verdict — book audit + UI
+        // dono isi se side-inversion prove/refute karte hain.
+        signalSide: normalizeSide(row.side),
+        directionIntegrity: {
+          verdict: row.directionIntegrity?.verdict ?? 'UNMEASURED',
+          score: row.directionIntegrity?.score ?? null,
+          label: row.directionIntegrity?.label ?? null,
+          handoff: 'VERIFIED',
+          geometry: checkLevelGeometry({ side: row.side, entry: finalEntry, stopLoss: finalSl, t1: finalT1, t2: finalT2 }).code,
+          alert: postFillDirAlert,
+        },
         score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin,
         entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
         t1: finalT1, t2: finalT2, qty: finalQty,
@@ -2670,6 +2768,11 @@ export function mtfAutoStatus(liveQuotes = {}) {
     day: st.day,
     dayCount: st.dayCount,
     openCount: open.length,
+    // v21.25.0 BOOK DIRECTION WATCHDOG: har OPEN trade ka side uske apne
+    // SL/T1/T2 geometry se cross-check (LONG: SL<entry<T1≤T2). Inversion
+    // ya broken ticket mila to yahan `findings` me loud dikhega — silent
+    // wrong-side position management ab possible nahi.
+    directionIntegrityBook: auditBookDirectionIntegrity(st.book || [], []),
     openNotionalINR: Math.round(_openNotionalINR()),
     book: st.book.filter(b => b.closeReason !== 'PURGED_UNTRADED_ENTRY').slice(-30).reverse(),
     events: st.events.slice(-40).reverse(),

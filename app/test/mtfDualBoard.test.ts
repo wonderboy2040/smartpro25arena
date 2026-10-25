@@ -297,11 +297,28 @@ describe('mtfProEntryGate - manual PAPER/LIVE parity with auto quality gates', (
     expect(g.blockers).toEqual(expect.arrayContaining(['direction not PAKKA verified', 'trigger fire pending']));
   });
 
-  it('fails closed when the main ensemble signal is unavailable', () => {
-    const g = mtfProEntryGate(proRow({ ensembleSignalAvailable: false }), { mainSignal: null });
+  // v21.25.1 SELF-VERIFIED LANE: main board ne symbol cover nahi kiya (ya
+  // WATCH hai) to bhi PAKKA-verified row trade kar sakti hai — warna quiet
+  // market me (aur XAU/XAG + EQUITY SIM par, jo main board me hote hi nahi)
+  // auto/manual entry PERMANENT dead-end thi.
+  it('fails closed when the main ensemble signal is unavailable AND the row is not self-verified', () => {
+    const g = mtfProEntryGate(proRow({ ensembleSignalAvailable: false, directionVerified: false, triggerFired: false }), { mainSignal: null });
     expect(g.ok).toBe(false);
     expect(g.blockers.some(b => b.includes('ensemble signal unavailable'))).toBe(true);
     expect(g.blockers.some(b => b.includes('ensemble signal missing'))).toBe(true);
+  });
+
+  it('self-verified PAKKA row trades even when the main ensemble has no coverage (v21.25.1)', () => {
+    const g = mtfProEntryGate(proRow({ ensembleSignalAvailable: false }), { mainSignal: null });
+    expect(g.ok).toBe(true);
+    expect(g.blockers).toEqual([]);
+  });
+
+  it('self-verification is NOT a loophole: an opposing main board side still vetoes', () => {
+    const shortRow = proRow({ side: 'SHORT', ensembleSignalAvailable: false, plan: { entry: 100, stopLoss: 101, t1: 99, t2: 98 } });
+    const g = mtfProEntryGate(shortRow, { mainSignal: mainLong({ grade: 'WATCH', confidence: 40 }) });
+    expect(g.ok).toBe(false);
+    expect(g.blockers.some(b => b.includes('cross-engine veto'))).toBe(true);
   });
 
   it('blocks a fresh main signal before its stability window', () => {
@@ -310,16 +327,26 @@ describe('mtfProEntryGate - manual PAPER/LIVE parity with auto quality gates', (
     expect(g.blockers.some(b => b.includes('stability confirm pending'))).toBe(true);
   });
 
-  it('blocks a same-side but non-actionable NEUTRAL main signal', () => {
-    const g = mtfProEntryGate(proRow(), { mainSignal: mainLong({ grade: 'NEUTRAL', confidence: 5 }) });
+  it('blocks a non-actionable NEUTRAL main signal when the row is not self-verified', () => {
+    const g = mtfProEntryGate(proRow({ directionVerified: false, triggerFired: false }), { mainSignal: mainLong({ grade: 'NEUTRAL', confidence: 5 }) });
     expect(g.ok).toBe(false);
     expect(g.blockers.some(b => b.includes('grade NEUTRAL'))).toBe(true);
     expect(g.blockers.some(b => b.includes('confidence 5 < 60'))).toBe(true);
   });
 
-  it('auto candidates also reject rows without ensemble context', () => {
-    const out = dualAutoCandidates([proRow({ ensembleSignalAvailable: false })], { minScore: 75 }, { openSymbols: new Set(), lastEntryAt: {} });
+  it('a self-verified row is not blocked by a weak same-side main grade (main board lags the MTF board)', () => {
+    const g = mtfProEntryGate(proRow(), { mainSignal: mainLong({ grade: 'NEUTRAL', confidence: 5 }) });
+    expect(g.ok).toBe(true);
+  });
+
+  it('auto candidates reject un-verified rows without ensemble context', () => {
+    const out = dualAutoCandidates([proRow({ ensembleSignalAvailable: false, directionVerified: false })], { minScore: 75 }, { openSymbols: new Set(), lastEntryAt: {} });
     expect(out[0].autoPickBlockers.some(b => b.includes('ensemble signal unavailable'))).toBe(true);
+  });
+
+  it('auto candidates ACCEPT a self-verified row when the main board has no coverage (v21.25.1)', () => {
+    const out = dualAutoCandidates([proRow({ ensembleSignalAvailable: false })], { minScore: 75 }, { openSymbols: new Set(), lastEntryAt: {} });
+    expect(out[0].autoPickBlockers).toEqual([]);
   });
 });
 describe('v21.16.0 — cost/noise-stop gates (live-test regression)', () => {

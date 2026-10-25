@@ -2,6 +2,8 @@
 
 Three-desk AI trading terminal: **Crypto (CoinDCX)**, **India Intraday (NSE)**, and **Portfolio** — with dual-timeframe MTF signal boards, paper trading, live-position monitoring, AI committee/ensemble scoring, Telegram alerts, and a local Ollama intelligence layer.
 
+> **v21.25.0 — Direction Integrity Guard (DIG):** the LONG/SHORT invariant (ticket geometry, signal→order handoff, exchange vocabulary, post-fill level repair) is now enforced in one pure module (`app/server/ai/directionIntegrity.js`) across the MTF Dual-Timeframe Board, the AUTO Live lane, and the live book. Plus an 8-check AUTO-LIVE conviction stack. See `app/AUDIT-REPORT-v21.25.0.md` and `app/MEGA-UPGRADE-v21.25.0.md`.
+>
 > Current app version: see `app/package.json` (`check:version` keeps `package.json`, `package-lock.json`, and the build stamp in sync).
 
 ---
@@ -36,7 +38,7 @@ npm start
 ## Project layout
 
 ```
-smartaipro25/
+smartpro25arena/
 ├─ app/
 │  ├─ src/                 React + TypeScript frontend (three desks, panels, hooks)
 │  ├─ server/              Express API, signal engines, execution, MCP mesh, Telegram
@@ -66,6 +68,7 @@ npm test              # vitest (sequential; can take 10+ minutes)
 npm run build         # production bundle
 npm run check:routes  # frontend fetch calls vs backend routes
 npm run audit:all     # npm audit for app + telegram-bot
+npm run audit:direction  # v21.25.0 — LONG/SHORT inversion auditor (exit 1 on inversion)
 ```
 
 Or the full chain: `npm run check`.

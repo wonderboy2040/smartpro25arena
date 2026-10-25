@@ -1,7 +1,7 @@
 {
   "name": "advance-pro-intelligence",
   "private": true,
-  "version": "21.24.0",
+  "version": "21.25.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -22,6 +22,8 @@
     "calibrate": "node scripts/botlab-calibrate.mjs",
     "backup-state": "node scripts/backup-state.mjs",
     "boot-smoke": "node scripts/boot-smoke.mjs",
+    "audit:direction": "node scripts/direction-audit.mjs",
+    "audit:direction:futures": "node scripts/direction-audit.mjs --markets=FUTURES,CRYPTO --mode=INTRADAY",
     "diagnose": "node scripts/full-diagnostic.mjs"
   },
   "dependencies": {

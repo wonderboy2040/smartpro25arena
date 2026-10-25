@@ -50,6 +50,13 @@ import { feeBreakevenFloor, defaultRoundTripFeePct } from '../exec/sizing.js';
 import { fetchFuturesPrices } from './futures.js';
 import { resolveDirection, checkDirectionLock } from './directionLock.js';
 import { recordMtfBoardScanRow, resolveMtfBoardScanOutcomes, computeMtfDirectionScorecard } from './signalLedger.js';
+// v21.25.0 DIRECTION INTEGRITY GUARD (DIG): har row par independent
+// multi-read direction audit + ticket-geometry invariant + board-wide digest.
+// Advisory verdict = 'COUNTER_READ' (legit pullback), blocking = 'INVERTED'
+// (3+ independent reads side ke against) / 'GEOMETRY_BROKEN' (levels ulta).
+import {
+  assessDirectionIntegrity, directionIntegrityDigest,
+} from './directionIntegrity.js';
 
 /** v21.18.0 USER SPEC: sirf 2 dual-timeframe modes on the integrated board:
  *   • INTRADAY : 15m deep (context) + 5m action (trigger)
@@ -664,6 +671,97 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
   // v21.23.14 [AUTO/MANUAL PARITY]: expose the main AI-BOARD signal age and
   // make a <5m-old signal auto-ineligible too. Manual PAPER/LIVE already
   // rejects it in mtfProEntryGate, but the auto lane never saw the age.
+  // ------------------------------------------------------------
+  // v21.25.0 DIRECTION INTEGRITY (per row)
+  // ------------------------------------------------------------
+  // fuseDualTf ka side plan se aata hai; yahan hum us side ko TEENO
+  // independent sources ke against parakh te hain: (1) ticket geometry,
+  // (2) context/trigger/EMA-stack/momentum ka weighted net read, (3) HTF bias.
+  // Verdict row par hi attach hota hai — UI badge + auto gate dono isi ko
+  // dekhte hain. `hardBlock` par autoEligible false ho jaata hai.
+  row.directionIntegrity = assessDirectionIntegrity({ side: row.side, plan, snap: snapAligned });
+  row.digLabel = row.directionIntegrity.label;
+  row.digScore = row.directionIntegrity.score;
+  if (row.directionIntegrity.hardBlock) {
+    row.autoEligible = false;
+    row.autoBlockers = Array.from(new Set([
+      ...(row.autoBlockers || []),
+      row.directionIntegrity.verdict === 'GEOMETRY_BROKEN'
+        ? `ticket geometry inverted (${row.directionIntegrity.geometry?.code}) — direction-integrity block`
+        : `${row.directionIntegrity.againstCount}/4 independent reads side ke against — inversion-suspect block`,
+    ]));
+  } else if (row.directionIntegrity.verdict === 'COUNTER_READ' && row.directionIntegrity.againstCount >= 2) {
+    // 2+ independent reads side ke against = strong counter-read. Ek read
+    // (e.g. pullback bar me EMA5 thoda neeche) legitimate entry hai — usse
+    // block karna over-filtering hoti; do ya zyada par auto band.
+    row.autoEligible = false;
+    row.autoBlockers = Array.from(new Set([
+      ...(row.autoBlockers || []),
+      `direction-integrity counter-read ${row.directionIntegrity.againstCount}/4 — WATCH-only`,
+    ]));
+  } else if (row.directionIntegrity.verdict === 'COUNTER_READ') {
+    // Soft advisory — blocker nahi, sirf UI note (counter-trend pullback OK).
+    row.digNote = `1/4 counter-read (${row.directionIntegrity.conflicts[0] || 'minor'}) — pullback entry ke liye acceptable`;
+  }
+  // ------------------------------------------------------------
+  // v21.25.0 AUTO LIVE TRADE INTELLIGENCE ("conviction stack")
+  // ------------------------------------------------------------
+  // AUTO lane ke liye ek hi suraksha kaafi nahi thi. Ab har row par ek
+  // LIVE-specific conviction stack calculate hota hai — paper bar (autoEligible)
+  // se STRICTER, kyunki live me real money lagti hai. 8 checks, har check
+  // ka honest detail; `liveReady` sirf tab true jab saare pass hon.
+  //   L1 direction integrity  — DIG ALIGNED (counter-read bhi live ke liye nahi)
+  //   L2 pakka verification   — directionVerified (8-indicator + dual-TF)
+  //   L3 trigger fired        — action TF ne actually break kiya
+  //   L4 institutional confluence — worldAligned8Count ≥ 6
+  //   L5 AI ensemble          — ollamaTrio approvedCount ≥ 2
+  //   L6 risk/reward          — net RR(T1) ≥ 0.35R aur RR(T2) ≥ 1.2R
+  //   L7 entry freshness      — overextended/chase nahi, TF-fit GOOD/OK
+  //   L8 no structural veto   — trap / zone-wall / reversal-risk clean
+  (() => {
+    const dig = row.directionIntegrity || {};
+    const checks = [];
+    const add = (k, ok, detail) => checks.push({ k, ok: !!ok, detail });
+    add('L1 direction integrity', dig.verdict === 'ALIGNED', `${dig.label || dig.verdict || 'unmeasured'} · DIG ${dig.score ?? '—'}/100`);
+    add('L2 pakka verification', !!row.directionVerified, row.directionVerified ? 'dual-TF + 8-indicator verified' : (row.pakkaDirectionLabel || 'not verified'));
+    add('L3 trigger fired', !!row.triggerFired, row.triggerFired ? 'action-TF break confirmed' : 'trigger fire pending');
+    const w8 = Number(row.worldIndicators?.aligned8Count ?? row.worldIndicators?.alignedCount);
+    add('L4 institutional confluence', Number.isFinite(w8) && w8 >= 6, Number.isFinite(w8) ? `${w8}/8 institutional indicators aligned` : 'confluence unmeasured');
+    const aiOk = Number(row.ollamaTrio?.approvedCount || 0);
+    add('L5 AI ensemble', aiOk >= 2, `${aiOk}/3 local models verified`);
+    const rr1 = Number(row.plan?.netRR?.t1);
+    const rr2 = Number(row.plan?.netRR?.t2);
+    add('L6 risk/reward', Number.isFinite(rr1) && rr1 >= 0.35 && Number.isFinite(rr2) && rr2 >= 1.2, `net RR T1 ${Number.isFinite(rr1) ? rr1.toFixed(2) : '—'}R · T2 ${Number.isFinite(rr2) ? rr2.toFixed(2) : '—'}R`);
+    add('L7 entry freshness', (row.tfFit === 'GOOD' || row.tfFit === 'OK') && !row.trigger?.overextended, `${row.tfFit || 'unknown'} · ${row.trigger?.overextended ? 'overextended (chase)' : 'not chased'}`);
+    add('L8 no structural veto', !row.trapVeto && !row.zoneWallVeto && !row.reversalRisk, row.trapVeto ? 'trap veto' : row.zoneWallVeto ? 'zone-wall veto' : row.reversalRisk ? 'reversal risk' : 'clean');
+    const passed = checks.filter(c => c.ok).length;
+    const digScore = Number(dig.score);
+    const convictionScore = Math.round(
+      0.34 * (Number(row.superScore) || 0)
+      + 0.22 * (Number.isFinite(digScore) ? digScore : 50)
+      + 0.16 * Math.min(100, (Number.isFinite(w8) ? w8 / 8 : 0) * 100)
+      + 0.14 * ((aiOk / 3) * 100)
+      + 0.14 * (Number(row.pWinCalibrated ?? row.winRatePct) || 50)
+    );
+    row.liveIntelligence = {
+      liveReady: checks.every(c => c.ok) && !!row.autoEligible,
+      checksPassed: passed, checksTotal: checks.length, checks,
+      convictionScore: Math.max(0, Math.min(100, convictionScore)),
+      convictionTier: passed >= 8 ? 'LIVE-A' : passed >= 6 ? 'LIVE-B' : passed >= 4 ? 'PAPER' : 'WATCH',
+      blockers: checks.filter(c => !c.ok).map(c => `${c.k}: ${c.detail}`),
+      note: 'Live lane 8-check conviction stack — paper auto-bar se stricter (real money).',
+    };
+  })();
+  // v21.25.1: auto lane ko ek nazar me pata chale ki row kis key par chal rahi hai.
+  row.selfVerified = selfVerifiedForAuto(row);
+  row.autoEnsembleOk = autoEnsembleOk(row);
+  if (row.ensembleSignalAvailable === false && row.selfVerified) {
+    // Main board ne symbol cover nahi kiya / WATCH hai — row apne PAKKA
+    // verification par auto-eligible hai. Blocker list me se purana ensemble
+    // blocker hata do (warna UI jhoota "ensemble unavailable" dikhata hai).
+    row.autoBlockers = (row.autoBlockers || []).filter(b => !String(b).includes('main AI-BOARD ensemble signal unavailable'));
+    if (row.autoBlockers.length === 0) row.autoEligible = true;
+  }
   const mainSignalAgeMs = Number(boardSig?.signalAge?.ageMs);
   row.mainSignalAgeMs = Number.isFinite(mainSignalAgeMs) && mainSignalAgeMs >= 0 ? mainSignalAgeMs : null;
   if (row.mainSignalAgeMs != null && row.mainSignalAgeMs < 5 * 60_000) {
@@ -897,7 +995,23 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
 
   const minBar = Number(minScore || 75);
   const candidateRows = rankDualRows(rows, minBar);
-  const trimmed = candidateRows.slice(0, maxRows);
+  // v21.25.1 NEVER-BLANK BOARD (user: "crypto coindcx tab me koi trade mill
+  // hi nhi hai"): jab ranked pool khaali ho (quiet market — koi row WATCH
+  // floor 50 cross nahi karti) to tab BLANK chhodna galat signal deta hai
+  // ("board dead hai"). Ab best directional rows (side + valid plan) score
+  // ke hisaab se dikhte hain, WATCH label ke saath — user ko dikhta hai ki
+  // market me kya ho raha hai aur kyun trade nahi lag raha.
+  let rankFallback = false;
+  let trimmed = candidateRows.slice(0, maxRows);
+  if (trimmed.length === 0) {
+    const flat = rows
+      .filter(r => r && r.ok && SIDEABLE.has(r.side) && Number(r.plan?.entry) > 0 && Number(r.plan?.stopLoss) > 0)
+      .sort((a, b) => (Number(b.superScore) || 0) - (Number(a.superScore) || 0));
+    if (flat.length) {
+      rankFallback = true;
+      trimmed = flat.slice(0, Math.min(3, maxRows));
+    }
+  }
   const q75 = trimmed.filter(r => r.superScore != null && r.superScore >= Number(minScore));
   const earlyRadar = buildEarlyRadar([...rows, ...metalsRowsRaw, ...equitySimRowsRaw].filter(Boolean), 3);
 
@@ -930,7 +1044,24 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
     minScore: Number(minScore) || 75,
     topDeepTrendLimit: TOP_DEEP_TREND_LIMIT,
     scannedCount: rows.length,
+    rankFallback,
     directionScorecard,
+    // v21.25.0 DIRECTION INTEGRITY BOARD DIGEST — poore board ka ek nazar me
+    // LONG/SHORT truth: kitni rows geometrically coherent, kitni aligned,
+    // kitni counter-read (WATCH) aur kitni inversion-suspect (blocked).
+    directionIntegrity: directionIntegrityDigest(trimmed),
+    liveIntelligence: {
+      liveReady: trimmed.filter(r => r?.liveIntelligence?.liveReady).length,
+      liveA: trimmed.filter(r => r?.liveIntelligence?.convictionTier === 'LIVE-A').length,
+      liveB: trimmed.filter(r => r?.liveIntelligence?.convictionTier === 'LIVE-B').length,
+      paper: trimmed.filter(r => r?.liveIntelligence?.convictionTier === 'PAPER').length,
+      watch: trimmed.filter(r => r?.liveIntelligence?.convictionTier === 'WATCH').length,
+      avgConviction: (() => {
+        const v = trimmed.map(r => Number(r?.liveIntelligence?.convictionScore)).filter(Number.isFinite);
+        return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null;
+      })(),
+      asOf: Date.now(),
+    },
     liveFeed24x7: {
       active: true,
       cadenceMs: BOARD_TTL_MS,
@@ -1014,6 +1145,47 @@ export function peekDualMtfBoards(maxAgeMs = 90_000) {
 }
 
 // ------------------------------------------------------------
+// v21.25.1 SELF-VERIFIED AUTO LANE (user: "elite score rehne par bhi auto
+// trade nahi lag raha")
+// ------------------------------------------------------------
+// ROOT CAUSE: har auto/manual entry ko main AI-BOARD ensemble ka ACTION+
+// grade chahiye tha. Par main ensemble ka universe alag hai aur quiet market
+// me wo ghanton tak WATCH se upar jaata hi nahi (live probe: FUTURES board me
+// top score 69 WATCH) — isliye MTF dual board ki ELITE/PAKKA row bhi
+// `main AI-BOARD ensemble signal unavailable` par mar jaati thi. Gold/Silver
+// (XAU/XAG) aur EQUITY SIM symbols main FUTURES board me hote hi nahi — unke
+// liye ye gate PERMANENT dead-end tha.
+//
+// Ye helper ek honest second key deta hai. Row apne dum par "trade-ready"
+// tabhi kehlati hai jab DUAL-TF + 8-indicator verification PAKKA ho, trigger
+// FIRE ho chuka ho, koi structural veto na ho, DIG ALIGNED ho, ticket poora
+// ho aur TF-fit GOOD/OK ho. Main ensemble ka OPPOSITE call ab bhi hard veto
+// hai (boardSideConflict) — sirf "main board ne is symbol ko cover nahi
+// kiya / abhi WATCH hai" wala dead-end hata hai.
+export function selfVerifiedForAuto(row) {
+  if (!row || typeof row !== 'object' || !row.ok) return false;
+  if (row.side !== 'LONG' && row.side !== 'SHORT') return false;
+  if (row.directionVerified !== true) return false;
+  if (row.triggerFired !== true) return false;
+  if (row.counterTrend || row.counterHtf) return false;
+  if (row.boardSideConflict || row.svaConflict || row.councilConflict) return false;
+  if (row.trapVeto || row.zoneWallVeto || row.reversalRisk) return false;
+  if (row.trigger?.opposingFlow || row.trigger?.reversalRisk || row.trigger?.postPeakTrap || row.trigger?.overextended) return false;
+  if (row.directionIntegrity && row.directionIntegrity.hardBlock) return false;
+  const score = Number(row.superScore);
+  if (!Number.isFinite(score) || score < (Number(SUPER_TIERS.ACTION) || 65)) return false;
+  if (row.tfFit != null && row.tfFit !== 'GOOD' && row.tfFit !== 'OK') return false;
+  const p = row.plan || {};
+  if (!(Number(p.entry) > 0) || !(Number(p.stopLoss) > 0) || !(Number(p.t1) > 0)) return false;
+  return true;
+}
+
+/** Auto-lane ensemble key: main board actionable OR the row is self-verified. */
+export function autoEnsembleOk(row) {
+  return row?.ensembleSignalAvailable !== false || selfVerifiedForAuto(row);
+}
+
+// ------------------------------------------------------------
 // 4) AUTO-LINK SIFT — pure; execution mtfAutoLink.js karta hai
 // ------------------------------------------------------------
 export function mtfProEntryGate(row, {
@@ -1033,7 +1205,12 @@ export function mtfProEntryGate(row, {
   }
   if (!row.ok) push(row.error || 'plan unavailable');
   if (!side) push('no clean LONG/SHORT side');
-  if (row.ensembleSignalAvailable === false) push('main AI-BOARD ensemble signal unavailable — fresh scan ka wait karo');
+  // v21.25.1 SELF-VERIFIED LANE: main board ne is symbol ko cover nahi kiya
+  // (ya abhi WATCH hai) to row apne PAKKA dual-TF + 8-indicator verification
+  // par trade kar sakti hai. Main board ka OPPOSITE call neeche cross-engine
+  // veto hi rehta hai (hard block).
+  const selfVerified = selfVerifiedForAuto(row);
+  if (row.ensembleSignalAvailable === false && !selfVerified) push('main AI-BOARD ensemble signal unavailable — fresh scan ka wait karo');
   if (!row.directionVerified) push('direction not PAKKA verified');
   if (row.triggerFired !== true) push('trigger fire pending');
   if (row.counterHtf) push(`1d+4h HTF bias ${row.htfBias || 'opposite'} against ${side || 'side'}`);
@@ -1062,11 +1239,14 @@ export function mtfProEntryGate(row, {
 
   if (mainSignal) {
     const mainGrade = String(mainSignal?.grade || '').toUpperCase();
-    if (!['ACTION', 'STRONG', 'ELITE'].includes(mainGrade)) {
+    // v21.25.1: grade/confidence sirf tab block karte hain jab row self-verified
+    // na ho. Self-verified row ke liye ye informational hai (main board ka
+    // opposite side ab bhi veto hai — neeche).
+    if (!selfVerified && !['ACTION', 'STRONG', 'ELITE'].includes(mainGrade)) {
       push(`main AI-BOARD grade ${mainGrade || 'UNKNOWN'} actionable nahi (ACTION+ chahiye)`);
     }
     const mainConf = Number(mainSignal?.confidence);
-    if (Number.isFinite(mainConf) && mainConf < 60) {
+    if (!selfVerified && Number.isFinite(mainConf) && mainConf < 60) {
       push(`main AI-BOARD confidence ${mainConf} < 60`);
     }
     if (mainSide && side && mainSide !== side) {
@@ -1083,7 +1263,7 @@ export function mtfProEntryGate(row, {
     if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < minMainSignalAgeMs) {
       push(`main AI-BOARD signal sirf ${Math.max(0, Math.round(ageMs / 60_000))}m old — stability confirm pending`);
     }
-  } else if (requireMainSignal) {
+  } else if (requireMainSignal && !selfVerified) {
     push('main AI-BOARD ensemble signal missing — entry blocked');
   }
 
@@ -1114,7 +1294,7 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
     const reasons = [];
     if (!row?.ok) reasons.push('plan unavailable');
     if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '—'} < ${minScore}`);
-    if (row?.ensembleSignalAvailable === false) reasons.push('main AI-BOARD ensemble signal unavailable');
+    if (row?.ensembleSignalAvailable === false && !selfVerifiedForAuto(row)) reasons.push('main AI-BOARD ensemble signal unavailable');
     if (row?.autoBlockers?.length) reasons.push(...row.autoBlockers);
     if (openSymbols.has(String(row?.symbol || '').toUpperCase())) reasons.push('already open');
     const last = lastEntryAt[String(row?.symbol || '').toUpperCase()] || 0;

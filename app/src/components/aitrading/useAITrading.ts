@@ -991,6 +991,36 @@ export interface MtfDualRow {
   drivers?: string[]; gates?: string[];
   components?: Array<{ k: string; w: number; v: number; contrib: number | null }>;
   autoEligible: boolean; autoBlockers: string[]; autoPickBlockers?: string[];
+  /** v21.25.0 DIRECTION INTEGRITY GUARD (DIG) — row ka independent multi-read direction audit. */
+  directionIntegrity?: {
+    ok: boolean;
+    verdict: 'ALIGNED' | 'COUNTER_READ' | 'INVERTED' | 'GEOMETRY_BROKEN' | 'MISSING_SIDE' | string;
+    hardBlock: boolean;
+    score: number;
+    side: 'LONG' | 'SHORT' | null;
+    netDir: number;
+    agreeCount: number;
+    againstCount: number;
+    conflicts: string[];
+    label: string;
+    note?: string | null;
+    geometry?: { ok: boolean; code: string; reason?: string | null; impliedSide?: 'LONG' | 'SHORT' | null };
+    votes?: Record<string, number>;
+  } | null;
+  digLabel?: string | null;
+  digScore?: number | null;
+  digNote?: string | null;
+  /** v21.25.0 AUTO LIVE TRADE INTELLIGENCE — 8-check live conviction stack. */
+  liveIntelligence?: {
+    liveReady: boolean;
+    checksPassed: number;
+    checksTotal: number;
+    checks: Array<{ k: string; ok: boolean; detail: string }>;
+    convictionScore: number;
+    convictionTier: 'LIVE-A' | 'LIVE-B' | 'PAPER' | 'WATCH' | string;
+    blockers: string[];
+    note?: string;
+  } | null;
   ensembleSignalAvailable?: boolean;
   plan?: { entry?: number | null; entryZoneLow?: number | null; entryZoneHigh?: number | null; pullbackEntry?: number | null; breakoutEntry?: number | null; triggerLevel?: number | null; stopLoss?: number | null; stopPct?: number | null; t1?: number | null; t2?: number | null; netRR?: { t1?: number | null; t2?: number | null }; qty?: number | null; wideStopNote?: string | null; chandelierStop?: number | null } | null;
   context?: { struct?: string; rsi?: number | null; adx?: number | null; atrPct?: number | null; supertrend?: string | null; note?: string } | null;
@@ -1061,6 +1091,17 @@ export interface MtfDualBoardView {
   contextTf?: string; triggerTf?: string; holdMin?: number; minScore?: number;
   topDeepTrendLimit?: number; scannedCount?: number;
   directionScorecard?: MtfDirectionScorecardView | null;
+  /** v21.25.0 board-wide direction integrity digest (LONG/SHORT truth at a glance). */
+  directionIntegrity?: {
+    total: number; aligned: number; counterRead: number; inverted: number;
+    geometryBroken: number; missingSide: number; avgScore: number | null;
+    hardBlocked: string[]; asOf: number;
+  } | null;
+  /** v21.25.0 AUTO Live Trade intelligence roll-up. */
+  liveIntelligence?: {
+    liveReady: number; liveA: number; liveB: number; paper: number; watch: number;
+    avgConviction: number | null; asOf: number;
+  } | null;
   earlyRadar?: MtfEarlyRadarRow[];
   liveFeed24x7?: { active: boolean; cadenceMs: number; directTickOverlay: number; asOf: number };
   // v21.23.1: `avgWinRatePct` ab nullable — missing rows pe fabricated 88 nahi milta.
@@ -1096,6 +1137,12 @@ export async function fetchMtfDualBoard(
 
 export interface MtfAutoStatus {
   ok: boolean; enabled: boolean; mode?: TradePlanModeId; holdMin?: number | null;
+  /** v21.25.0 book-wide direction watchdog: har OPEN trade ka side vs ticket geometry. */
+  directionIntegrityBook?: {
+    ok: boolean; checked: number; open: number; inversions: number;
+    findings: Array<{ symbol: string; side: 'LONG' | 'SHORT' | null; status: string; code: string; reason?: string | null; boardSide?: string | null; severity: string }>;
+    asOf: number;
+  } | null;
   minScore: number; riskPerTradeINR: number; maxPositionsINR: number; maxNotionalPerTradeINR?: number;
   maxTradesPerDay: number; maxOpenPositions?: number; cooldownMin: number;
   desks?: { india: boolean; crypto: boolean }; timeStopEnabled?: boolean;

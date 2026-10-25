@@ -375,10 +375,13 @@ describe('v21.23.11 [L3] compute/vote/plan — mirrored series can never read op
 
 // ---------------- L4: certificates ----------------
 describe('v21.23.11 [L4] runDirectionSelfTest — extended with mirror-shield section', () => {
-  it('passes 18/18 including the mirror cases', () => {
+  it('passes every check including the mirror cases (18 base + v21.25.0 DIG checks)', () => {
     const r = runDirectionSelfTest();
     expect(r.pass).toBe(true);
-    expect(r.version).toBe('v21.23.11');
+    // v21.25.0: 18 base/mirror checks + 6 DIRECTION INTEGRITY GUARD checks.
+    expect(r.total).toBeGreaterThanOrEqual(18);
+    expect(r.passed).toBe(r.total);
+    expect(r.version).toBe('v21.25.0');
     const names = r.checks.map(c => c.name);
     expect(names.some(n => n.includes('newest-first → canonical ASCENDING'))).toBe(true);
     expect(names.some(n => n.includes('open_time-key drift'))).toBe(true);

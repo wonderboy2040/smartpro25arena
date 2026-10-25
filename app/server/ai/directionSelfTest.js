@@ -31,6 +31,10 @@ import { futuresOrderBody } from './futures.js';
 import { sideSignOf } from './superIntel.js';
 // v21.23.11 MIRROR-SHIELD: synthetic wire-drift cases (the missing test class)
 import { canonicalizeCandles, ensureAscending, seriesOrientation } from './lib/candles.js';
+// v21.25.0 DIRECTION INTEGRITY GUARD — geometry/handoff/repair certificates.
+import {
+  checkLevelGeometry, assertExecutionSide, resolveSideFromGeometry, guardLevelsForSide,
+} from './directionIntegrity.js';
 
 // ---- synthetic ground-truth candle generators (deterministic) ----
 function makeRisingCandles(count = 90, start = 100, stepPct = 0.003, intervalMs = 300_000) {
@@ -217,11 +221,38 @@ export function runDirectionSelfTest() {
     );
   }
 
+  // ---- 5) DIRECTION INTEGRITY GUARD (v21.25.0) ----
+  // Ticket geometry = ground truth. Ek SHORT-shaped ticket LONG row me ghusa
+  // ho to yahi check pakadta hai (aur yahi user ka "ulta trade" vector tha).
+  {
+    const longOk = checkLevelGeometry({ side: 'LONG', entry: 100, stopLoss: 98, t1: 104, t2: 108 });
+    const shortOk = checkLevelGeometry({ side: 'SHORT', entry: 100, stopLoss: 102, t1: 96, t2: 92 });
+    add('DIG geometry: coherent LONG (SL<entry<T1≤T2) + coherent SHORT (SL>entry>T1≥T2)',
+      longOk.ok && shortOk.ok, `LONG=${longOk.code} SHORT=${shortOk.code}`);
+    const longBroken = checkLevelGeometry({ side: 'LONG', entry: 100, stopLoss: 102, t1: 104, t2: 108 });
+    const shortBroken = checkLevelGeometry({ side: 'SHORT', entry: 100, stopLoss: 98, t1: 96, t2: 92 });
+    add('DIG geometry: SHORT-shaped LONG ticket + LONG-shaped SHORT ticket both flagged INVERTED',
+      !longBroken.ok && longBroken.inverted && !shortBroken.ok && shortBroken.inverted,
+      `LONG-vs-SHORT-sl=${longBroken.code} SHORT-vs-LONG-sl=${shortBroken.code}`);
+    const noSide = checkLevelGeometry({ side: 'WAIT', entry: 100, stopLoss: 98 });
+    add('DIG geometry: unknown side REFUSED (no silent LONG default)', noSide.code === 'SIDE_UNKNOWN', `code=${noSide.code}`);
+    const handoffBad = assertExecutionSide({ signalSide: 'LONG', execSide: 'SHORT' });
+    add('DIG handoff: LONG signal → SHORT order BLOCKED (SIDE_MISMATCH)',
+      !handoffBad.ok && handoffBad.code === 'SIDE_MISMATCH', handoffBad.reason || 'no reason');
+    const derived = resolveSideFromGeometry({ side: '', entry: 100, stopLoss: 102, t1: 96, t2: 92 });
+    add('DIG geometry: missing side → honest derive from level-ordering (SHORT)',
+      derived.ok && derived.side === 'SHORT' && derived.repaired, `side=${derived.side} repaired=${derived.repaired}`);
+    const repaired = guardLevelsForSide({ side: 'LONG', entry: 100, stopLoss: 103, t1: 99, t2: 98 });
+    add('DIG repair: inverted LONG levels re-derived to SL<entry<T1<T2',
+      repaired.ok && repaired.stopLoss < 100 && repaired.t1 > 100 && repaired.t2 > repaired.t1,
+      `SL=${repaired.stopLoss} T1=${repaired.t1} T2=${repaired.t2}`);
+  }
+
   const pass = checks.every(c => c.ok);
   return {
     pass,
     ranAt: Date.now(),
-    version: 'v21.23.11',
+    version: 'v21.25.0',
     passed: checks.filter(c => c.ok).length,
     total: checks.length,
     checks,

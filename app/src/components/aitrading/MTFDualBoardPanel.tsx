@@ -610,6 +610,26 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 {counts.rows} rows · <span className="text-emerald-300">{counts.overBar}≥75</span> · <span className="text-cyan-300">{counts.eligible} auto-ready</span> · <span className="text-amber-300">{counts.strong} ELITE/STRONG</span> · <span className="text-rose-300">{counts.fired} fired</span> · <span className="text-amber-300">🪙 {metalsRows.length} XAU/XAG</span> · <span className="text-sky-300">🌎 {equitySimRows.length} Equity Sim</span>
               </span>
             )}
+            {/* v21.25.0 DIRECTION INTEGRITY board digest — LONG/SHORT truth at a glance */}
+            {board?.directionIntegrity && board.directionIntegrity.total > 0 && (
+              <span data-testid="mtf-dig-board-digest"
+                className={`px-1.5 py-0.5 rounded-md text-[9px] font-black border ${
+                  (board.directionIntegrity.inverted || 0) > 0
+                    ? 'border-red-400/70 bg-red-500/25 text-red-100'
+                    : 'border-emerald-500/45 bg-emerald-500/12 text-emerald-200'
+                }`}
+                title={`Direction Integrity Guard (v21.25.0): har row ka ticket geometry + independent multi-read direction audit. Inverted ${board.directionIntegrity.inverted} · geometry-broken ${board.directionIntegrity.geometryBroken} · counter-read ${board.directionIntegrity.counterRead} · aligned ${board.directionIntegrity.aligned} · avg score ${board.directionIntegrity.avgScore ?? '—'}/100${board.directionIntegrity.hardBlocked?.length ? ` · BLOCKED: ${board.directionIntegrity.hardBlocked.join(', ')}` : ''}`}>
+                🧭 DIR-INTEGRITY {(board.directionIntegrity.inverted || 0) === 0 && (board.directionIntegrity.geometryBroken || 0) === 0 ? 'CLEAN' : 'ALERT'} · {board.directionIntegrity.aligned}/{board.directionIntegrity.total} aligned · {board.directionIntegrity.counterRead} counter · {board.directionIntegrity.inverted + board.directionIntegrity.geometryBroken} inverted
+              </span>
+            )}
+            {/* v21.25.0 AUTO LIVE intelligence roll-up */}
+            {board?.liveIntelligence && (
+              <span data-testid="mtf-liveintel-board-digest"
+                className="px-1.5 py-0.5 rounded-md text-[9px] font-black border border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                title={`AUTO Live Trade intelligence: live-ready ${board.liveIntelligence.liveReady} · LIVE-A ${board.liveIntelligence.liveA} · LIVE-B ${board.liveIntelligence.liveB} · PAPER ${board.liveIntelligence.paper} · WATCH ${board.liveIntelligence.watch} · avg conviction ${board.liveIntelligence.avgConviction ?? '—'}/100 (8-check live bar)`}>
+                🟢 LIVE-READY {board.liveIntelligence.liveReady}/{board.liveIntelligence.liveReady + board.liveIntelligence.liveA + board.liveIntelligence.liveB + board.liveIntelligence.paper + board.liveIntelligence.watch} · conviction {board.liveIntelligence.avgConviction ?? '—'}/100
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1.5">
             <button onClick={() => void loadBoard()} className="p-1 rounded border border-slate-500/30 hover:border-violet-500/50" title="24×7 Direct Board Refresh">
@@ -677,6 +697,17 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
               <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-[9px] font-mono text-emerald-200">
                 🔒 Full CoinDCX Active Position Control · Sirf Active Traded Positions · TP1/TP2 + SL Trail + Reversal Profit-Book
               </span>
+              {/* v21.25.0 BOOK DIRECTION WATCHDOG — auto-live book me koi bhi
+                  ulta ticket turant yahan red me dikhega (silent nahi). */}
+              {auto?.directionIntegrityBook && (
+                <span data-testid="mtf-book-dig-chip"
+                  title={`Direction Integrity Book Audit: ${auto.directionIntegrityBook.checked} book rows, ${auto.directionIntegrityBook.open} open — declared side vs SL/T1/T2 geometry${auto.directionIntegrityBook.findings?.length ? ` | FINDINGS: ${auto.directionIntegrityBook.findings.map(f => `${f.symbol} ${f.code}`).join(', ')}` : ' · all coherent'}`}
+                  className={`px-2 py-0.5 rounded-md border text-[9px] font-mono ${(auto.directionIntegrityBook.inversions || 0) > 0
+                    ? 'bg-red-500/25 border-red-400/70 text-red-100'
+                    : 'bg-violet-500/15 border-violet-500/40 text-violet-200'}`}>
+                  🧭 DIR-INTEGRITY BOOK {(auto.directionIntegrityBook.inversions || 0) > 0 ? `INVERSION ${auto.directionIntegrityBook.inversions}` : 'CLEAN'} · {auto.directionIntegrityBook.open} open audited
+                </span>
+              )}
             </div>
             <div className="mt-1 text-[9px] font-mono text-slate-400">
               {statusLine}
@@ -959,6 +990,38 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                           className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/30 text-red-100 border border-red-400/70"
                           title={`Cross-Engine Direction Conflict: Board Ensemble says ${oppBoardSide} (${r.signals?.board?.aiScore ?? '—'}) while MTF Dual Board says ${r.side} — capped ≤64 & blocked from auto-entry`}>
                           ⚠ BOARD: {oppBoardSide}{r.signals?.board?.aiScore != null ? ` ${r.signals.board.aiScore}` : ''} vs MTF: {r.side}
+                        </span>
+                      )}
+                      {/* v21.25.0 DIRECTION INTEGRITY GUARD chip — independent proof */}
+                      {(() => {
+                        const dig = r.directionIntegrity;
+                        if (!dig) return null;
+                        const cls = dig.verdict === 'ALIGNED'
+                          ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/60'
+                          : dig.verdict === 'COUNTER_READ'
+                            ? 'bg-amber-500/20 text-amber-200 border-amber-400/60'
+                            : 'bg-red-500/30 text-red-100 border-red-400/70';
+                        const icon = dig.verdict === 'ALIGNED' ? '🧭' : dig.verdict === 'COUNTER_READ' ? '🧭' : '⛔';
+                        return (
+                          <span data-testid={`mtf-dig-chip-${r.symbol}`}
+                            className={`px-1.5 py-0.5 rounded-md text-[9px] font-black border ${cls}`}
+                            title={`Direction Integrity Guard (v21.25.0): ticket geometry + context/trigger/EMA-stack/momentum ke independent reads. ${dig.agreeCount}/4 aligned, ${dig.againstCount}/4 against. ${(dig.conflicts || []).join(' · ')} ${dig.note || ''}`}>
+                            {icon} DIG {dig.verdict === 'ALIGNED' ? `ALIGNED ${dig.agreeCount}/4` : dig.verdict === 'COUNTER_READ' ? `COUNTER ${dig.againstCount}/4` : dig.verdict} · {dig.score}/100
+                          </span>
+                        );
+                      })()}
+                      {/* v21.25.0 AUTO LIVE conviction chip — live lane ka quality bar */}
+                      {r.liveIntelligence && (
+                        <span data-testid={`mtf-liveconv-chip-${r.symbol}`}
+                          className={`px-1.5 py-0.5 rounded-md text-[9px] font-black border ${
+                            r.liveIntelligence.liveReady
+                              ? 'bg-emerald-500/25 text-emerald-100 border-emerald-400/70'
+                              : r.liveIntelligence.convictionTier === 'PAPER'
+                                ? 'bg-cyan-500/15 text-cyan-200 border-cyan-400/50'
+                                : 'bg-slate-500/15 text-slate-300 border-slate-500/40'
+                          }`}
+                          title={`AUTO LIVE conviction stack (8 checks): ${(r.liveIntelligence.checks || []).map(c => `${c.ok ? '✔' : '✘'} ${c.k} — ${c.detail}`).join(' · ')}${r.liveIntelligence.blockers?.length ? ` | MISSING: ${r.liveIntelligence.blockers.join(' · ')}` : ''}`}>
+                          {r.liveIntelligence.liveReady ? '🟢 LIVE-READY' : `🎯 ${r.liveIntelligence.convictionTier}`} {r.liveIntelligence.checksPassed}/{r.liveIntelligence.checksTotal} · {r.liveIntelligence.convictionScore}/100
                         </span>
                       )}
                       {r.ensembleSignalAvailable === false && (
