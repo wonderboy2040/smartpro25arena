@@ -1162,22 +1162,54 @@ export function peekDualMtfBoards(maxAgeMs = 90_000) {
 // ho aur TF-fit GOOD/OK ho. Main ensemble ka OPPOSITE call ab bhi hard veto
 // hai (boardSideConflict) — sirf "main board ne is symbol ko cover nahi
 // kiya / abhi WATCH hai" wala dead-end hata hai.
-export function selfVerifiedForAuto(row) {
-  if (!row || typeof row !== 'object' || !row.ok) return false;
-  if (row.side !== 'LONG' && row.side !== 'SHORT') return false;
-  if (row.directionVerified !== true) return false;
-  if (row.triggerFired !== true) return false;
-  if (row.counterTrend || row.counterHtf) return false;
-  if (row.boardSideConflict || row.svaConflict || row.councilConflict) return false;
-  if (row.trapVeto || row.zoneWallVeto || row.reversalRisk) return false;
-  if (row.trigger?.opposingFlow || row.trigger?.reversalRisk || row.trigger?.postPeakTrap || row.trigger?.overextended) return false;
-  if (row.directionIntegrity && row.directionIntegrity.hardBlock) return false;
+// v21.25.2 RECHECK FIX: `selfVerifiedForAuto` sirf true/false deta tha, isliye
+// auto skip-text har non-self-verified row par ek hi generic line chhap deta
+// tha — "main AI-BOARD ensemble signal unavailable" — chahe asli rukawat
+// score floor ho, trigger fire pending ho, ya ticket adhoora ho. User ke liye
+// ye misleading tha (ensemble theek chal raha hota tha, gate score par atka
+// tha). Ye helper WAHI conditions check karta hai par har fail ki asli wajah
+// return karta hai. Order + thresholds `selfVerifiedForAuto` se bilkul same
+// hain (single source of truth: selfVerifiedForAuto ab isi par based hai), so
+// gating behaviour me koi badlav nahi.
+export function selfVerifyMissing(row) {
+  if (!row || typeof row !== 'object' || !row.ok) return ['plan unavailable'];
+  const miss = [];
+  if (row.side !== 'LONG' && row.side !== 'SHORT') miss.push('no clean LONG/SHORT side');
+  if (row.directionVerified !== true) miss.push('direction PAKKA verify pending');
+  if (row.triggerFired !== true) miss.push('trigger not fired');
+  if (row.counterTrend) miss.push('counter-trend');
+  if (row.counterHtf) miss.push(`HTF bias ${row.htfBias || 'opposite'}`);
+  if (row.boardSideConflict) miss.push(`main board ${row.boardSide || 'opposite'} conflict`);
+  if (row.svaConflict) miss.push('SVA FLIP');
+  if (row.councilConflict) miss.push('council hard-no');
+  if (row.trapVeto) miss.push('trap veto');
+  if (row.zoneWallVeto) miss.push('zone-wall veto');
+  if (row.reversalRisk) miss.push('reversal risk');
+  if (row.trigger?.opposingFlow) miss.push('opposing flow');
+  if (row.trigger?.reversalRisk) miss.push('rejection wick');
+  if (row.trigger?.postPeakTrap) miss.push('post-peak trap');
+  if (row.trigger?.overextended) miss.push('overextended');
+  if (row.directionIntegrity && row.directionIntegrity.hardBlock) miss.push('DIG hard block');
   const score = Number(row.superScore);
-  if (!Number.isFinite(score) || score < (Number(SUPER_TIERS.ACTION) || 65)) return false;
-  if (row.tfFit != null && row.tfFit !== 'GOOD' && row.tfFit !== 'OK') return false;
+  const floor = Number(SUPER_TIERS.ACTION) || 65;
+  if (!Number.isFinite(score)) miss.push('score unmeasured');
+  else if (score < floor) miss.push(`score ${score} < ${floor}`);
+  if (row.tfFit != null && row.tfFit !== 'GOOD' && row.tfFit !== 'OK') miss.push(`TF fit ${row.tfFit}`);
   const p = row.plan || {};
-  if (!(Number(p.entry) > 0) || !(Number(p.stopLoss) > 0) || !(Number(p.t1) > 0)) return false;
-  return true;
+  if (!(Number(p.entry) > 0) || !(Number(p.stopLoss) > 0) || !(Number(p.t1) > 0)) miss.push('incomplete ticket');
+  return miss;
+}
+
+export function selfVerifiedForAuto(row) {
+  return selfVerifyMissing(row).length === 0;
+}
+
+/** Human-readable, Hinglish auto-lane skip line for one row (dedup + cap). */
+export function autoSkipReason(row) {
+  const miss = selfVerifyMissing(row);
+  if (!miss.length) return null;
+  const shown = miss.slice(0, 3).join(', ');
+  return `self-verify pending: ${shown}${miss.length > 3 ? ` +${miss.length - 3} more` : ''}`;
 }
 
 /** Auto-lane ensemble key: main board actionable OR the row is self-verified. */
@@ -1210,7 +1242,11 @@ export function mtfProEntryGate(row, {
   // par trade kar sakti hai. Main board ka OPPOSITE call neeche cross-engine
   // veto hi rehta hai (hard block).
   const selfVerified = selfVerifiedForAuto(row);
-  if (row.ensembleSignalAvailable === false && !selfVerified) push('main AI-BOARD ensemble signal unavailable — fresh scan ka wait karo');
+  // v21.25.2: generic "ensemble unavailable" ki jagah ASLI rukawat batao.
+  if (row.ensembleSignalAvailable === false && !selfVerified) {
+    const miss = selfVerifyMissing(row);
+    push(`main AI-BOARD ensemble signal unavailable — ${miss.length ? `self-verify pending: ${miss.slice(0, 4).join(', ')}` : 'fresh scan ka wait karo'}`);
+  }
   if (!row.directionVerified) push('direction not PAKKA verified');
   if (row.triggerFired !== true) push('trigger fire pending');
   if (row.counterHtf) push(`1d+4h HTF bias ${row.htfBias || 'opposite'} against ${side || 'side'}`);
@@ -1294,7 +1330,12 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
     const reasons = [];
     if (!row?.ok) reasons.push('plan unavailable');
     if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '—'} < ${minScore}`);
-    if (row?.ensembleSignalAvailable === false && !selfVerifiedForAuto(row)) reasons.push('main AI-BOARD ensemble signal unavailable');
+    // v21.25.2 RECHECK FIX: pehle har non-self-verified row par ek hi generic
+    // line chhapti thi. Ab asli missing condition list hoti hai — user ko pata
+    // chalta hai ki ensemble dead hai ya score/trigger/ticket gate atka hai.
+    if (row?.ensembleSignalAvailable === false && !selfVerifiedForAuto(row)) {
+      reasons.push(`main AI-BOARD ensemble signal unavailable — ${autoSkipReason(row) || 'self-verify pending'}`);
+    }
     if (row?.autoBlockers?.length) reasons.push(...row.autoBlockers);
     if (openSymbols.has(String(row?.symbol || '').toUpperCase())) reasons.push('already open');
     const last = lastEntryAt[String(row?.symbol || '').toUpperCase()] || 0;

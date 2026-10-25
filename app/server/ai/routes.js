@@ -7,7 +7,7 @@
 //   GET  /api/ai/options?symbol=NIFTY    chain + analytics + strategies
 //   GET  /api/ai/trading/state           config + daily risk state
 //   POST /api/ai/trading/config          update (LIVE needs typed phrase)
-//   POST /api/ai/trading/kill-switch     { enabled }
+//   POST /api/ai/trading/kill-switch     { enabled } (aliases: { on }, { killSwitch })
 //   POST /api/ai/execute                 THE gauntlet — crypto (paper | live)
 //   POST /api/ai/india/execute           THE gauntlet — India Dhan (v6.5)
 //   GET  /api/ai/positions               journal positions + uPnL + entries
@@ -1753,7 +1753,20 @@ export function registerAITradingRoutes(app, deps) {
 
   app.post('/api/ai/trading/kill-switch', (req, res) => {
     try {
-      const enabled = !!(req.body || {}).enabled;
+      // v21.25.2 RECHECK FIX: body key ka naam har jagah alag tha — yahan
+      // `enabled`, config route par `killSwitch`, aur bahut si jagah `on`.
+      // Galat key bhejne par route chup-chaap `false` (DISARM) kar deta tha —
+      // ek safety switch ke liye ye galat default hai. Ab teeno alias
+      // accept hote hain aur koi bhi explicit boolean na mile to 400.
+      const body = req.body || {};
+      const raw = [body.enabled, body.on, body.killSwitch].find(v => typeof v === 'boolean' || v === 'true' || v === 'false' || v === 0 || v === 1 || v === '1' || v === '0');
+      if (raw === undefined) {
+        return res.status(400).json({
+          ok: false,
+          error: 'kill-switch needs an explicit boolean — send {"enabled":true} (or {"on":true}); an empty body no longer disarms silently',
+        });
+      }
+      const enabled = raw === true || raw === 'true' || raw === 1 || raw === '1';
       const cfg = updateConfig({ killSwitch: enabled });
       if (enabled) {
         cancelAllExchangeOrders().catch(() => { /* best-effort */ });

@@ -1,5 +1,52 @@
 # Changelog
 
+## v21.25.2 — Full-site advance recheck (repo pull + end-to-end flow verification + 3 real fixes) (2026-10-25)
+
+**User ask: "latest repo ko pull karo aur full site code advance pro level pe recheck karo aur issues fix kardo — sab features and functions working flow theek se kaam kar raha hai ya nahi."**
+
+### 0) Pull
+`origin` add kiya (`github.com/wonderboy2040/smartpro25arena`) → `origin/main` = `54e7716`. **Koi naya upstream commit nahi tha** — working tree pehle se hi latest ke barabar (sirf v21.25.1 ke untracked artefacts extra). Isliye merge/rebase nahi hua; recheck usi latest code par chala.
+
+### Verification surface (kya-kya actually chalaya gaya)
+| Gate | Result |
+|---|---|
+| `npm run build` + `dist/.build-version` stamp | OK (rebuilt) |
+| Boot selftest `[direction-selftest]` | **PASS 24/24** · 16 voting + 4 shadow seats · accuracy-suite ON |
+| `npm test` (full vitest) | **236 files · 4458 tests · 0 fail** |
+| `npm run typecheck` / `npm run lint` / `npm run check:routes` | clean / clean / **PASS** |
+| `npm run audit:direction` | **42 pass · 0 INVERSION** · 4 counter-read (WATCH-only) |
+| `node scripts/full-diagnostic.mjs` | **PASS 26 · WARN 5 · FAIL 0** |
+| `node scripts/route-sweep.mjs` (naya harness, is build me hard) | **106 routes · 5xx 6 (sab declared degrade) · failures 0 · contracts 27/27** |
+| `node scripts/ui-smoke.mjs` (naya, headless Chromium) | **PASS 14/14** — PIN gate (galat PIN reject + sahi PIN unlock), teeno desk render, theme toggle, reload session, 0 console/page error, 0 failing `/api/*` |
+
+Live flow proofs (real market data, is machine): 5 MTF boards (FUTURES/CRYPTO/INDIA/METALS/GLOBALFUTURES) LONG/SHORT-only + `inverted:0 geometryBroken:0`; AUTO paper tick ne **BNB LONG 82 STRONG** open kiya (SL 738.63 < entry 743 < T1 747.37 < T2 751.74, leverage 5, fee-breakeven 743.89) aur paper desk me dikha; close → history round-trip OK; NSE closed guard, kill-switch gate, SSE (`/api/stream`, `/api/intraday-stream`, `/api/ai/positions/stream`) sab live.
+
+### Fix 1 — AUTO skip-reason ab ASLI wajah batata hai (misleading text)
+Pehle har non-self-verified row par ek hi line aati thi — *"main AI-BOARD ensemble signal unavailable"* — chahe ensemble theek chal raha ho aur rukawat **score floor / trigger pending / ticket adhoora** ho. Live evidence: `NVDA: score 64 < 75, main AI-BOARD ensemble signal unavailable` — user ko galat wajah dikh rahi thi.
+Ab `selfVerifyMissing(row)` / `autoSkipReason(row)` (mtfDualBoard.js) har fail condition ko naam se batate hain, aur `selfVerifiedForAuto()` ab **isi list ka empty hona** hai (single source of truth — gating me koi badlav nahi):
+```
+ZRO: score 64 < 75, main AI-BOARD ensemble signal unavailable — self-verify pending:
+     direction PAKKA verify pending, trigger not fired, reversal risk +1 more
+```
+Isi wording se manual 🧪 PAPER / ⚡ LIVE gate ke blockers bhi precise ho gaye.
+
+### Fix 2 — kill-switch route: silent DISARM bug
+`POST /api/ai/trading/kill-switch` sirf `{enabled}` padhta tha; `{"on":true}` bhejne par `enabled=false` ho jaata tha aur switch **chup-chaap DISARM** ho jaata tha — ek safety switch ke liye galat default. Ab `enabled` / `on` / `killSwitch` teeno accept hote hain, aur **koi bhi explicit boolean na ho to 400** (`{"enabled":true}` maango) — no-body mutation se disarm impossible. Live: `{}`→400 · `{on:true}`→killSwitch true · `{enabled:false}`→false.
+
+### Fix 3 — route-sweep harness trustworthy gate bana
+Pehla sweep run 11 "failures" report kar raha tha jo bug nahi the: 5 SSE routes (`ERR 0 45001ms`) + 6 optional-service 5xx. Ab harness:
+- **SSE-aware**: `isSseRoute()` source se detect karta hai, `hitSse()` stream kholke pehle bytes (bounded 4s) padhta hai → live/most dead classify;
+- **declared-degrade aware**: orderbook / expert (ml-service) / cloud load / intraday-briefing ko named WARN karta hai, FAIL nahi (chhupata nahi — print karta hai);
+- **param-aware**: GET sweep ke 400 (missing query) ko "route validate kar raha hai" WARN me daalta hai, error object ko readable banata hai;
+- **kill-switch contract** live assert karta hai (empty body 400 · `{on:true}` arms · `{enabled:false}` disarms).
+Result: `failures 0 · contracts 27/27 · RESULT PASS`.
+
+### Naya: `scripts/ui-smoke.mjs`
+Server probes UI ko prove nahi kar sakte. Ye script headless Chromium se asli app chalata hai: login gate (galat PIN reject test bhi), INDIA/CRYPTO/BOT LAB teeno desk ka render + content, theme toggle, reload par session, aur **console errors / page errors / failing `/api/*` responses** ka budget. Screenshots + per-desk text `data/ui-audit-<ts>/` me. `PLAYWRIGHT_HOME=<dir with playwright>` se chalta hai (devDependency nahi — production install heavy na ho).
+
+### Tests
+- **New** `test/v21252Recheck.test.ts` (17 cases): `selfVerifyMissing` per-condition reasons · `selfVerifiedForAuto` parity matrix (gating unchanged) · skip-line dedupe/cap · ensemble line ab asli cause carry karti hai · kill-switch alias/explicit-boolean contract · sweep harness SSE/degrade contract.
+
 ## v21.25.1 — "ELITE score ke bawajood auto trade nahi lag raha" + CoinDCX tab khaali (2026-10-25)
 
 **User ask: "crypto coindcx tab me koi trade mill hi nhi hai aur elite score rehne par bhi Live auto trade button on rehne par bhi auto trade nahi lag raha — sirf itna hi theek kardo."**

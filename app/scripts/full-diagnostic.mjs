@@ -312,7 +312,14 @@ async function sectionC(ENV) {
       if (!v) continue;
       if (v.healthy === true) mark('pass', `WebSocket ${k}`, `live · age ${v.ageSec ?? v.ageMs ?? '?'}s`);
       else if (v.armed === false) info(`WebSocket ${k}`, 'IDLE (koi subscriber nahi — by design, error nahi)');
-      else mark('warn', `WebSocket ${k} down`, `failStreak ${v.failStreak ?? '?'}${v.cooldownReason ? ` · ${v.cooldownReason}` : ''} — REST fallback chal raha hai`);
+      else if (!v.lastTickAt && !v.lastUpdateAt && !(v.failStreak > 0) && !v.cooldownReason && !v.cooldownRemainMs) {
+        // v21.25.2: subscribes present par abhi tak koi attributable tick
+        // nahi AUR koi handshake failure/cooldown bhi nahi = socket connect
+        // ho raha hai / tick ka intezar — WARN ("down") galat alarm tha.
+        // Prices REST poller se aa rahe hain (sources live rehte hain), aur
+        // real handshake failure failStreak/cooldownReason set karta hai.
+        info(`WebSocket ${k}`, 'armed · no attributable tick yet (failStreak 0, no cooldown) — REST poller prices de raha hai');
+      } else mark('warn', `WebSocket ${k} down`, `failStreak ${v.failStreak ?? '?'}${v.cooldownReason ? ` · ${v.cooldownReason}` : ''} — REST fallback chal raha hai`);
     }
     if (h.feeds?.growwApi) {
       const g = h.feeds.growwApi;

@@ -277,7 +277,8 @@ app.use(requireAuth);
 // preflight. CORS only hides the RESPONSE; the mutation still runs.
 // That silently authenticates no-body mutations like:
 //   POST /api/ai/orders/cancel-all          (cancels ALL live orders)
-//   POST /api/ai/trading/kill-switch {}     (enabled:false → DISARMS it)
+//   POST /api/ai/trading/kill-switch {"enabled":false}  (explicit false → DISARMS it;
+//                                           an empty body is now a 400, not a silent disarm)
 //   POST /api/ai/dhan/disconnect            (forgets broker keys)
 //   POST /api/mcp/coindcx/disconnect        (forgets API keys)
 // /api/auth/logout already had this exact discriminator inline; it is
